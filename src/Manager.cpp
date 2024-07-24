@@ -54,7 +54,32 @@ void Manager::initializeDevice(uint32_t physicalDeviceIndex,
 Manager::~Manager()
 {
     KP_LOG_DEBUG("Kompute Manager Destructor started");
-    this->destroy();
+
+    if (this->mInstance == nullptr) {
+        KP_LOG_ERROR(
+          "Kompute Manager destructor reached with null Instance pointer");
+        return;
+    }
+
+    if (this->mDevice) {
+        this->destroy();
+    }
+
+#ifndef KOMPUTE_DISABLE_VK_DEBUG_LAYERS
+    if (this->mDebugReportCallback) {
+        this->mInstance->destroyDebugReportCallbackEXT(
+          this->mDebugReportCallback, nullptr, this->mDebugDispatcher);
+        this->mDebugReportCallback = nullptr;
+        KP_LOG_DEBUG("Kompute Manager Destroyed Debug Report Callback");
+    }
+#endif
+
+    if (this->mFreeInstance) {
+        this->mInstance->destroy(
+          (vk::Optional<const vk::AllocationCallbacks>)nullptr);
+        this->mInstance = nullptr;
+        KP_LOG_DEBUG("Kompute Manager Destroyed Instance");
+    }
 }
 
 void
@@ -112,33 +137,13 @@ Manager::destroy()
         this->mPipelineCache = nullptr;
     }
 
-    if (this->mFreeDevice) {
+    if (this->mFreeDevice && this->mDevice) {
         KP_LOG_INFO("Destroying device");
+        this->mComputeQueues.clear();
         this->mDevice->destroy(
           (vk::Optional<const vk::AllocationCallbacks>)nullptr);
         this->mDevice = nullptr;
         KP_LOG_DEBUG("Kompute Manager Destroyed Device");
-    }
-
-    if (this->mInstance == nullptr) {
-        KP_LOG_ERROR(
-          "Kompute Manager destructor reached with null Instance pointer");
-        return;
-    }
-
-#ifndef KOMPUTE_DISABLE_VK_DEBUG_LAYERS
-    if (this->mDebugReportCallback) {
-        this->mInstance->destroyDebugReportCallbackEXT(
-          this->mDebugReportCallback, nullptr, this->mDebugDispatcher);
-        KP_LOG_DEBUG("Kompute Manager Destroyed Debug Report Callback");
-    }
-#endif
-
-    if (this->mFreeInstance) {
-        this->mInstance->destroy(
-          (vk::Optional<const vk::AllocationCallbacks>)nullptr);
-        this->mInstance = nullptr;
-        KP_LOG_DEBUG("Kompute Manager Destroyed Instance");
     }
 }
 
@@ -273,7 +278,15 @@ Manager::createInstance()
 void
 Manager::clear()
 {
-    if (this->mManageResources) {
+    if (!this->mManageResources) {
+        return;
+    }
+
+    auto getTotalObjs = [this]() {
+        return this->mManagedTensors.size() + this->mManagedAlgorithmsMap.size() + this->mManagedSequences.size();
+    };
+    size_t objTotal = getTotalObjs();
+    while (objTotal > 0) {
         this->mManagedTensors.erase(
           std::remove_if(begin(this->mManagedTensors),
                          end(this->mManagedTensors),
@@ -292,6 +305,12 @@ Manager::clear()
                          end(this->mManagedSequences),
                          [](std::weak_ptr<Sequence> t) { return t.expired(); }),
           end(this->mManagedSequences));
+
+        size_t newTotal = getTotalObjs();
+        if (newTotal == objTotal) {
+            break;
+        }
+        objTotal = newTotal;
     }
 }
 
@@ -416,6 +435,11 @@ Manager::createDevice(const std::vector<uint32_t>& familyQueueIndices,
                      fmt::join(validExtensions, ", "));
     }
 
+    vk::PhysicalDeviceFeatures2 supportedFeatures;
+    vk::PhysicalDeviceVulkan12Features supportedFeatures12;
+    supportedFeatures.pNext = &supportedFeatures12;
+    physicalDevice.getFeatures2(&supportedFeatures);
+
     vk::PhysicalDeviceFeatures features;
     features.shaderInt16 = true;
 
@@ -427,6 +451,7 @@ Manager::createDevice(const std::vector<uint32_t>& familyQueueIndices,
     vk::PhysicalDeviceVulkan12Features features12;
     features12.storageBuffer8BitAccess = true;
     features12.uniformAndStorageBuffer8BitAccess = true;
+    features12.shaderFloat16 = supportedFeatures12.shaderFloat16;
     features12.shaderInt8 = true;
     features12.pNext = &features11;
 
